@@ -1,36 +1,51 @@
 /**
  * Example only — excluded from the package build.
  *
- * The engine is framework-agnostic, so NestJS integration is intentionally
- * thin. Bind your production AuctionStore implementation and expose the engine
- * from a provider.
+ * Register AuctionEngineModule once, then inject AuctionEngine anywhere.
+ * Bind your production AuctionStore (see prisma-postgres-store.ts) and,
+ * optionally, a Socket.IO event bus from your gateway.
  */
-import { Injectable, Module } from "@nestjs/common";
+import { Injectable, Logger, Module } from "@nestjs/common";
 import {
   AuctionEngine,
-  type AuctionStore,
-  SocketIoAuctionEventBus,
+  AuctionError,
+  InMemoryAuctionStore,
 } from "nestjs-realtime-auction-engine";
+import { AuctionEngineModule } from "nestjs-realtime-auction-engine/nestjs";
+
+const logger = new Logger("AuctionEngine");
 
 @Injectable()
-class AuctionStoreAdapter {
-  // Implement AuctionStore with your ORM/database.
-  // PostgreSQL adapters should use SELECT ... FOR UPDATE in withLockedAuction().
-}
+export class BidsService {
+  constructor(private readonly engine: AuctionEngine) {}
 
-@Injectable()
-class AuctionEngineProvider {
-  readonly engine: AuctionEngine;
-
-  constructor(store: AuctionStoreAdapter) {
-    this.engine = new AuctionEngine(store as unknown as AuctionStore);
+  async placeBid(auctionId: string, bidderId: string, amountMinor: bigint) {
+    try {
+      return await this.engine.placeBid({ auctionId, bidderId, amountMinor });
+    } catch (error) {
+      // AuctionError carries a stable `code` (BID_TOO_LOW, SELF_BID, ...)
+      // that maps cleanly onto HTTP 409/422 responses.
+      if (error instanceof AuctionError) {
+        logger.warn(`Rejected bid on ${auctionId}: ${error.code}`);
+      }
+      throw error;
+    }
   }
 }
 
 @Module({
-  providers: [AuctionStoreAdapter, AuctionEngineProvider],
-  exports: [AuctionEngineProvider],
+  imports: [
+    AuctionEngineModule.forRootAsync({
+      // imports: [PrismaModule],
+      // inject: [PrismaService],
+      useFactory: () => ({
+        store: new InMemoryAuctionStore(), // replace with PrismaPostgresAuctionStore
+        onError: (error, context) =>
+          logger.error(`${context.phase} failed for ${context.auctionId}`, error),
+      }),
+    }),
+  ],
+  providers: [BidsService],
+  exports: [BidsService],
 })
-export class AuctionsInfrastructureModule {}
-
-void SocketIoAuctionEventBus;
+export class AuctionsModule {}

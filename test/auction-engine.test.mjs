@@ -6,7 +6,7 @@ import {
   InMemoryAuctionStore,
   MemoryAuctionEventBus,
   SelfBidError,
-} from "../dist/index.js";
+} from "../dist/esm/index.js";
 
 function auction(overrides = {}) {
   return {
@@ -102,7 +102,7 @@ test("closes below-reserve auction without a winner", async () => {
   const engine = new AuctionEngine(store, { clock: fixedClock, eventBus: events });
 
   const result = await engine.closeExpiredAuctions();
-  assert.deepEqual(result, { scanned: 1, sold: 0, ended: 1, skipped: 0 });
+  assert.deepEqual(result, { scanned: 1, sold: 0, ended: 1, skipped: 0, failed: 0 });
   assert.equal(store.getAuction("auc-1").status, "ended");
   assert.equal(events.events.at(-1).type, "auction.closed");
 });
@@ -122,4 +122,81 @@ test("closes reserve-met auction as sold", async () => {
   const result = await engine.closeExpiredAuctions();
   assert.equal(result.sold, 1);
   assert.equal(store.getAuction("auc-1").status, "sold");
+});
+
+test("first bid may match the starting price, later bids need an increment", async () => {
+  const store = new InMemoryAuctionStore([
+    auction({ endAt: new Date("2026-10-02T19:00:00.000Z") }),
+  ]);
+  const engine = new AuctionEngine(store, { clock: fixedClock });
+
+  const first = await engine.placeBid({
+    auctionId: "auc-1",
+    bidderId: "buyer-1",
+    amountMinor: 10_000n,
+  });
+  assert.equal(first.minimumAcceptedMinor, 10_000n);
+
+  await assert.rejects(
+    engine.placeBid({ auctionId: "auc-1", bidderId: "buyer-2", amountMinor: 10_000n }),
+    (error) => error instanceof BidTooLowError && error.minimumAcceptedMinor === 10_500n,
+  );
+});
+
+test("a failing event bus does not reject an already committed bid", async () => {
+  const store = new InMemoryAuctionStore([auction()]);
+  const reported = [];
+  const engine = new AuctionEngine(store, {
+    clock: fixedClock,
+    eventBus: {
+      publish: () => {
+        throw new Error("socket down");
+      },
+    },
+    onError: (error, context) => reported.push({ error, context }),
+  });
+
+  const result = await engine.placeBid({
+    auctionId: "auc-1",
+    bidderId: "buyer-1",
+    amountMinor: 10_500n,
+  });
+
+  assert.equal(result.auction.currentBidMinor, 10_500n);
+  assert.equal(store.getBids("auc-1").length, 1);
+  assert.equal(reported.length, 1);
+  assert.equal(reported[0].context.phase, "publish");
+});
+
+test("one failing auction does not stop the close sweep", async () => {
+  const store = new InMemoryAuctionStore([
+    auction({ id: "broken", endAt: new Date("2026-10-02T17:58:00.000Z") }),
+    auction({
+      id: "ok",
+      endAt: new Date("2026-10-02T17:59:00.000Z"),
+      bidCount: 1,
+      currentBidMinor: 12_000n,
+      highestBidderId: "buyer-1",
+    }),
+  ]);
+  const lockedStore = {
+    listExpiredActiveAuctionIds: (now, limit) =>
+      store.listExpiredActiveAuctionIds(now, limit),
+    withLockedAuction: (auctionId, work) => {
+      if (auctionId === "broken") throw new Error("deadlock detected");
+      return store.withLockedAuction(auctionId, work);
+    },
+  };
+  const reported = [];
+  const engine = new AuctionEngine(lockedStore, {
+    clock: fixedClock,
+    onError: (error, context) => reported.push(context),
+  });
+
+  const result = await engine.closeExpiredAuctions();
+
+  assert.deepEqual(result, { scanned: 2, sold: 1, ended: 0, skipped: 0, failed: 1 });
+  assert.equal(store.getAuction("ok").status, "sold");
+  assert.equal(store.getAuction("broken").status, "active");
+  assert.deepEqual(reported, [{ phase: "close", auctionId: "broken" }]);
 });

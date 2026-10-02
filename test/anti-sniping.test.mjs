@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   applyAntiSniping,
   DEFAULT_ANTI_SNIPING_POLICIES,
-} from "../dist/index.js";
+} from "../dist/esm/index.js";
 
 test("extends a standard auction inside the anti-sniping window", () => {
   const now = new Date("2026-10-02T18:00:00.000Z");

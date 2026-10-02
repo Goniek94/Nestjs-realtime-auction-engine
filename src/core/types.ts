@@ -95,6 +95,8 @@ export interface CloseSweepResult {
   sold: number;
   ended: number;
   skipped: number;
+  /** Auctions whose close transaction threw; reported through onError. */
+  failed: number;
 }
 
 export type AuctionEvent =

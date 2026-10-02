@@ -6,25 +6,53 @@
   "author": "Mateusz Goszczycki",
   "private": false,
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/cjs/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
+    },
+    "./nestjs": {
+      "import": {
+        "types": "./dist/esm/nestjs/index.d.ts",
+        "default": "./dist/esm/nestjs/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/nestjs/index.d.ts",
+        "default": "./dist/cjs/nestjs/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "nestjs": [
+        "./dist/cjs/nestjs/index.d.ts"
+      ]
     }
   },
   "files": [
     "dist",
     "README.md",
     "LICENSE",
-    "SECURITY.md"
+    "SECURITY.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node scripts/write-cjs-package.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/*.test.mjs",
-    "check": "npm run typecheck && npm test"
+    "test": "npm run build && node --test test/*.test.mjs test/*.test.cjs",
+    "check": "npm run typecheck && npm test",
+    "prepublishOnly": "npm run check"
   },
   "keywords": [
     "auction",
@@ -39,13 +67,29 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Goniek94/nestjs-realtime-auction-engine.git"
+    "url": "https://github.com/Goniek94/Nestjs-realtime-auction-engine.git"
   },
   "bugs": {
-    "url": "https://github.com/Goniek94/nestjs-realtime-auction-engine/issues"
+    "url": "https://github.com/Goniek94/Nestjs-realtime-auction-engine/issues"
   },
-  "homepage": "https://github.com/Goniek94/nestjs-realtime-auction-engine#readme",
+  "homepage": "https://github.com/Goniek94/Nestjs-realtime-auction-engine#readme",
+  "peerDependencies": {
+    "@nestjs/common": ">=9"
+  },
+  "peerDependenciesMeta": {
+    "@nestjs/common": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "devDependencies": {
+    "@nestjs/common": "^11.2.7",
+    "@nestjs/core": "^11.2.7",
+    "@nestjs/testing": "^11.2.7",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
     "typescript": "^5.8.3"
   }
 }

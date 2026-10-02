@@ -13,6 +13,7 @@ import {
   type AntiSnipingPolicies,
 } from "./anti-sniping.js";
 import type {
+  AuctionEvent,
   AuctionEventBus,
   AuctionRecord,
   AuctionStore,
@@ -30,11 +31,31 @@ const NOOP_EVENTS: AuctionEventBus = {
   publish: () => undefined,
 };
 
+export type AuctionEngineErrorContext =
+  | { phase: "publish"; auctionId: string; event: AuctionEvent }
+  | { phase: "close"; auctionId: string };
+
 export interface AuctionEngineOptions {
   clock?: Clock;
   eventBus?: AuctionEventBus;
   antiSniping?: AntiSnipingPolicies;
+  /**
+   * Called for failures that must not break the caller: event publishing after
+   * a committed transaction, and a single auction failing during a close sweep.
+   * Defaults to console.error.
+   */
+  onError?: (error: unknown, context: AuctionEngineErrorContext) => void;
 }
+
+const DEFAULT_ON_ERROR: NonNullable<AuctionEngineOptions["onError"]> = (
+  error,
+  context,
+) => {
+  console.error(
+    `[auction-engine] ${context.phase} failed for auction ${context.auctionId}`,
+    error,
+  );
+};
 
 /**
  * Framework-agnostic auction core.
@@ -48,6 +69,7 @@ export class AuctionEngine {
   private readonly clock: Clock;
   private readonly eventBus: AuctionEventBus;
   private readonly antiSniping: AntiSnipingPolicies;
+  private readonly onError: NonNullable<AuctionEngineOptions["onError"]>;
 
   constructor(
     private readonly store: AuctionStore,
@@ -57,6 +79,7 @@ export class AuctionEngine {
     this.eventBus = options.eventBus ?? NOOP_EVENTS;
     this.antiSniping =
       options.antiSniping ?? DEFAULT_ANTI_SNIPING_POLICIES;
+    this.onError = options.onError ?? DEFAULT_ON_ERROR;
   }
 
   async placeBid(input: PlaceBidInput): Promise<PlaceBidResult> {
@@ -76,8 +99,12 @@ export class AuctionEngine {
           throw new AuctionEndedError();
         }
 
+        // The first bid may match the starting price; later bids must beat
+        // the current price by at least one increment.
         const minimumAcceptedMinor =
-          auction.currentBidMinor + auction.bidIncrementMinor;
+          auction.bidCount === 0
+            ? auction.currentBidMinor
+            : auction.currentBidMinor + auction.bidIncrementMinor;
         if (input.amountMinor < minimumAcceptedMinor) {
           throw new BidTooLowError(minimumAcceptedMinor);
         }
@@ -117,7 +144,8 @@ export class AuctionEngine {
     );
 
     // Important: this happens after the transaction/lock callback has resolved.
-    await this.eventBus.publish({
+    // The bid is already committed, so a publish failure must not reject.
+    await this.publishSafely({
       type: "auction.bidPlaced",
       auctionId: result.auction.id,
       bidId: result.bid.id,
@@ -145,31 +173,40 @@ export class AuctionEngine {
       sold: 0,
       ended: 0,
       skipped: 0,
+      failed: 0,
     };
 
     for (const auctionId of ids) {
-      const closed = await this.store.withLockedAuction(
-        auctionId,
-        async (tx): Promise<AuctionRecord | null> => {
-          const auction = await tx.getAuction();
-          if (
-            !auction ||
-            auction.status !== "active" ||
-            auction.endAt.getTime() > now.getTime()
-          ) {
-            return null;
-          }
+      let closed: AuctionRecord | null;
+      try {
+        closed = await this.store.withLockedAuction(
+          auctionId,
+          async (tx): Promise<AuctionRecord | null> => {
+            const auction = await tx.getAuction();
+            if (
+              !auction ||
+              auction.status !== "active" ||
+              auction.endAt.getTime() > now.getTime()
+            ) {
+              return null;
+            }
 
-          const reserveMet =
-            auction.bidCount > 0 &&
-            (auction.reservePriceMinor == null ||
-              auction.currentBidMinor >= auction.reservePriceMinor);
-          const hasWinner =
-            reserveMet && typeof auction.highestBidderId === "string";
+            const reserveMet =
+              auction.bidCount > 0 &&
+              (auction.reservePriceMinor == null ||
+                auction.currentBidMinor >= auction.reservePriceMinor);
+            const hasWinner =
+              reserveMet && typeof auction.highestBidderId === "string";
 
-          return tx.updateAuction({ status: hasWinner ? "sold" : "ended" });
-        },
-      );
+            return tx.updateAuction({ status: hasWinner ? "sold" : "ended" });
+          },
+        );
+      } catch (error) {
+        // One broken auction must not keep the rest of the batch open.
+        summary.failed += 1;
+        this.onError(error, { phase: "close", auctionId });
+        continue;
+      }
 
       if (!closed) {
         summary.skipped += 1;
@@ -179,7 +216,7 @@ export class AuctionEngine {
       if (closed.status === "sold") summary.sold += 1;
       else summary.ended += 1;
 
-      await this.eventBus.publish({
+      await this.publishSafely({
         type: "auction.closed",
         auctionId: closed.id,
         status: closed.status === "sold" ? "sold" : "ended",
@@ -191,5 +228,13 @@ export class AuctionEngine {
     }
 
     return summary;
+  }
+
+  private async publishSafely(event: AuctionEvent): Promise<void> {
+    try {
+      await this.eventBus.publish(event);
+    } catch (error) {
+      this.onError(error, { phase: "publish", auctionId: event.auctionId, event });
+    }
   }
 }

@@ -1,5 +1,8 @@
 # NestJS Realtime Auction Engine
 
+[![CI](https://github.com/Goniek94/Nestjs-realtime-auction-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/Goniek94/Nestjs-realtime-auction-engine/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+
 Reusable, concurrency-safe auction primitives for TypeScript and NestJS applications.
 
 The project is based on engineering patterns developed while building **MatchDays**, a working sports collectibles marketplace. The commercial MatchDays application remains private; this repository extracts only generic infrastructure that can be useful to other developers.
@@ -27,17 +30,20 @@ This package makes those rules explicit and testable.
 
 **v0.1.0** is an early public extraction. The core is intentionally framework-agnostic and has zero runtime dependencies. NestJS, Prisma/PostgreSQL and Socket.IO are integration layers around it.
 
+The package ships both ESM and CommonJS builds, so it works in default NestJS projects (CommonJS) as well as in ESM-only codebases.
+
 Implemented today:
 
 - serialized bid placement through a storage lock contract,
 - safe integer minor-unit money (`bigint`),
-- minimum-bid validation,
+- minimum-bid validation (the first bid may match the starting price),
 - self-bid prevention,
 - deterministic anti-sniping,
 - hard extension caps,
 - separate standard/live policies,
-- reserve-aware auction closing,
-- event publishing after transaction commit,
+- reserve-aware auction closing that keeps going when a single auction fails,
+- `AuctionEngineModule` for NestJS (`forRoot` / `forRootAsync`),
+- event publishing after transaction commit, with publish failures isolated from committed bids,
 - Socket.IO-compatible event bus,
 - PostgreSQL advisory lock helper for multi-replica cron jobs,
 - transactional in-memory adapter,
@@ -49,10 +55,10 @@ Implemented today:
 npm install nestjs-realtime-auction-engine
 ```
 
-Until the first npm release, install directly from GitHub after the repository is published:
+Until the first npm release, install directly from GitHub:
 
 ```bash
-npm install github:Goniek94/nestjs-realtime-auction-engine
+npm install github:Goniek94/Nestjs-realtime-auction-engine
 ```
 
 ## Quick start
@@ -179,6 +185,20 @@ The engine publishes `auction.bidPlaced` only after `withLockedAuction()` resolv
 
 That ordering is deliberate. Broadcasting from inside an open database transaction can create a phantom bid in connected clients if the transaction subsequently rolls back.
 
+The reverse problem is handled too: once the bid is committed, a failing event bus (for example a dropped Redis or Socket.IO connection) does **not** make `placeBid()` reject. Otherwise the bidder would be told their bid failed while it is already stored. Publish failures are reported through the `onError` option instead:
+
+```ts
+const engine = new AuctionEngine(store, {
+  eventBus,
+  onError: (error, context) => {
+    // context.phase is "publish" or "close"
+    logger.error(`${context.phase} failed for ${context.auctionId}`, error);
+  },
+});
+```
+
+`onError` defaults to `console.error`.
+
 Available events in v0.1:
 
 - `auction.bidPlaced`
@@ -204,6 +224,12 @@ const result = await engine.closeExpiredAuctions(100);
 ```
 
 Every candidate is re-read under the auction lock before its state is changed. This protects against stale cron scans and concurrent updates.
+
+Each auction is closed in its own transaction. If one of them throws (deadlock, constraint violation, network blip), it is counted in `result.failed`, reported through `onError`, and the sweep continues with the remaining auctions. It stays `active` and is picked up again by the next run.
+
+```ts
+// { scanned: 3, sold: 1, ended: 1, skipped: 0, failed: 1 }
+```
 
 Behavior:
 
@@ -232,9 +258,39 @@ The helper uses a transaction-scoped advisory lock and returns `false` immediate
 
 ## NestJS integration
 
-The core deliberately does not require `@nestjs/common`, which keeps the package usable outside NestJS and avoids forcing framework versions on consumers.
+The core deliberately does not require `@nestjs/common`, which keeps the package usable outside NestJS and avoids forcing framework versions on consumers. The NestJS module lives in a separate entry point:
 
-In NestJS, expose `AuctionEngine` from a provider and bind your own `AuctionStore` adapter. See `examples/nestjs-integration.ts`.
+```ts
+import { Module } from "@nestjs/common";
+import { AuctionEngineModule } from "nestjs-realtime-auction-engine/nestjs";
+
+@Module({
+  imports: [
+    AuctionEngineModule.forRootAsync({
+      imports: [PrismaModule],
+      inject: [PrismaService],
+      useFactory: (prisma: PrismaService) => ({
+        store: new PrismaPostgresAuctionStore(prisma),
+      }),
+    }),
+  ],
+})
+export class AuctionsModule {}
+```
+
+Then inject the engine anywhere in that module:
+
+```ts
+import { Injectable } from "@nestjs/common";
+import { AuctionEngine } from "nestjs-realtime-auction-engine";
+
+@Injectable()
+export class BidsService {
+  constructor(private readonly engine: AuctionEngine) {}
+}
+```
+
+`forRoot({ store, ...options })` is available for static configuration, and both variants accept `isGlobal: true`. See `examples/nestjs-integration.ts`.
 
 ## What is intentionally not included
 
@@ -274,9 +330,9 @@ Planned areas for future releases:
 - Redis-backed distributed event transport,
 - proxy bidding / max-bid strategy,
 - optimistic-read helpers,
-- auction lifecycle hooks,
+- auction lifecycle hooks (including `upcoming` -> `active` transitions),
 - OpenTelemetry instrumentation,
-- load-test fixtures for high-contention bidding,
+- PostgreSQL integration tests and load-test fixtures for high-contention bidding,
 - richer NestJS integration package.
 
 ## Origin
