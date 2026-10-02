@@ -1,0 +1,51 @@
+{
+  "name": "nestjs-realtime-auction-engine",
+  "version": "0.1.0",
+  "description": "Concurrency-safe realtime auction primitives for TypeScript and NestJS applications.",
+  "license": "MIT",
+  "author": "Mateusz Goszczycki",
+  "private": false,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "check": "npm run typecheck && npm test"
+  },
+  "keywords": [
+    "auction",
+    "nestjs",
+    "typescript",
+    "socket.io",
+    "realtime",
+    "anti-sniping",
+    "postgresql",
+    "marketplace",
+    "bidding"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Goniek94/nestjs-realtime-auction-engine.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Goniek94/nestjs-realtime-auction-engine/issues"
+  },
+  "homepage": "https://github.com/Goniek94/nestjs-realtime-auction-engine#readme",
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}
